@@ -5,12 +5,15 @@
 (define-constant err-proposal-not-found (err u103))
 (define-constant err-invalid-proposal (err u104))
 (define-constant err-already-voted (err u105))
+(define-constant err-stream-not-found (err u107))
+(define-constant err-stream-finished (err u108))
 (define-constant one-tenth u10)
 
 (define-data-var treasury-balance uint u0)
 (define-data-var total-invested uint u0)
 (define-data-var proposal-counter uint u0)
 (define-data-var governance-threshold uint u2)
+(define-data-var stream-nonce uint u0)
 
 (define-map treasury-deposits principal uint)
 (define-map fund-allocations (tuple (fund-id uint)) uint)
@@ -31,6 +34,14 @@
   (apy uint)
   (invested-amount uint)
   (claimed-rewards uint)
+))
+(define-map vesting-streams uint (tuple
+  (recipient principal)
+  (total-amount uint)
+  (claimed-amount uint)
+  (start-height uint)
+  (end-height uint)
+  (active bool)
 ))
 
 (define-public (deposit-to-treasury (amount uint))
@@ -125,37 +136,21 @@
 )
 
 (define-public (vote-on-proposal (proposal-id uint) (vote-for bool))
-  (let ((proposal (map-get? governance-proposals proposal-id)))
+  (let ((proposal (map-get? governance-proposals proposal-id))
+        (voter-stake (default-to u0 (map-get? treasury-deposits tx-sender))))
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (is-some proposal) err-proposal-not-found)
+    (asserts! (> voter-stake u0) err-insufficient-funds) ;; Check for skin in the game
     (asserts! (not (default-to false (map-get? voter-records (tuple (proposal-id proposal-id) (voter tx-sender))))) err-already-voted)
     (let ((current-proposal (unwrap! proposal err-proposal-not-found)))
       (begin
         (map-set voter-records (tuple (proposal-id proposal-id) (voter tx-sender)) true)
         (if vote-for
-          (let ((new-votes-for (+ (get votes-for current-proposal) u1)))
-            (map-set governance-proposals proposal-id (tuple
-              (proposal-id (get proposal-id current-proposal))
-              (proposal-type (get proposal-type current-proposal))
-              (target-fund (get target-fund current-proposal))
-              (allocation-amount (get allocation-amount current-proposal))
-              (votes-for new-votes-for)
-              (votes-against (get votes-against current-proposal))
-              (status (get status current-proposal))
-              (timestamp (get timestamp current-proposal))
-            ))
+          (let ((new-votes-for (+ (get votes-for current-proposal) voter-stake)))
+            (map-set governance-proposals proposal-id (merge current-proposal { votes-for: new-votes-for }))
           )
-          (let ((new-votes-against (+ (get votes-against current-proposal) u1)))
-            (map-set governance-proposals proposal-id (tuple
-              (proposal-id (get proposal-id current-proposal))
-              (proposal-type (get proposal-type current-proposal))
-              (target-fund (get target-fund current-proposal))
-              (allocation-amount (get allocation-amount current-proposal))
-              (votes-for (get votes-for current-proposal))
-              (votes-against new-votes-against)
-              (status (get status current-proposal))
-              (timestamp (get timestamp current-proposal))
-            ))
+          (let ((new-votes-against (+ (get votes-against current-proposal) voter-stake)))
+            (map-set governance-proposals proposal-id (merge current-proposal { votes-against: new-votes-against }))
           )
         )
         (ok true)
@@ -202,6 +197,60 @@
   )
 )
 
+(define-public (create-vesting-stream (recipient principal) (amount uint) (duration uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (> duration u0) err-invalid-amount)
+    (asserts! (<= amount (var-get treasury-balance)) err-insufficient-funds)
+    (let ((stream-id (var-get stream-nonce))
+          (end-height (+ stacks-block-height duration)))
+      (map-set vesting-streams stream-id {
+        recipient: recipient,
+        total-amount: amount,
+        claimed-amount: u0,
+        start-height: stacks-block-height,
+        end-height: end-height,
+        active: true
+      })
+      (var-set treasury-balance (- (var-get treasury-balance) amount))
+      (var-set stream-nonce (+ stream-id u1))
+      (ok stream-id)
+    )
+  )
+)
+
+(define-public (claim-vested-funds (stream-id uint))
+  (let ((stream (unwrap! (map-get? vesting-streams stream-id) err-stream-not-found)))
+    (asserts! (get active stream) err-stream-finished)
+    (asserts! (is-eq tx-sender (get recipient stream)) err-unauthorized)
+    (let ((current-height stacks-block-height)
+          (start (get start-height stream))
+          (end (get end-height stream))
+          (total (get total-amount stream))
+          (claimed (get claimed-amount stream)))
+      (let ((vested (if (>= current-height end)
+                        total
+                        (/ (* total (- current-height start)) (- end start)))))
+        (let ((claimable (- vested claimed)))
+          (asserts! (> claimable u0) err-insufficient-funds)
+          (try! (as-contract (stx-transfer? claimable tx-sender (get recipient stream))))
+          (map-set vesting-streams stream-id (merge stream { claimed-amount: vested, active: (< vested total) }))
+          (ok claimable)
+        )
+      )
+    )
+  )
+)
+
+(define-public (set-governance-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (var-set governance-threshold new-threshold)
+    (ok true)
+  )
+)
+
 (define-read-only (get-treasury-balance)
   (var-get treasury-balance)
 )
@@ -234,3 +283,25 @@
   (var-get governance-threshold)
 )
 
+(define-read-only (get-vesting-stream (stream-id uint))
+  (map-get? vesting-streams stream-id)
+)
+
+(define-read-only (get-stream-claimable-amount (stream-id uint))
+  (let ((stream (unwrap! (map-get? vesting-streams stream-id) u0)))
+    (let ((current-height stacks-block-height)
+          (start (get start-height stream))
+          (end (get end-height stream))
+          (total (get total-amount stream))
+          (claimed (get claimed-amount stream)))
+      (if (not (get active stream))
+          u0
+          (let ((vested (if (>= current-height end)
+                            total
+                            (/ (* total (- current-height start)) (- end start)))))
+            (- vested claimed)
+          )
+      )
+    )
+  )
+)
