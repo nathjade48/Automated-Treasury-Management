@@ -1,4 +1,3 @@
-(define-constant contract-owner tx-sender)    
 (define-constant err-unauthorized (err u100))
 (define-constant err-insufficient-funds (err u101))
 (define-constant err-invalid-amount (err u102))
@@ -11,6 +10,9 @@
 (define-constant err-no-locked-shares (err u110))
 (define-constant err-not-revocable (err u111))
 (define-constant one-tenth u10)
+
+(define-constant ROLE_ADMIN u0)
+(define-constant ROLE_STRATEGIST u1)
 
 (use-trait proposal-trait .proposal-trait.proposal-trait)
 (use-trait integrated-strategy-trait .integrated-strategy-trait.integrated-strategy-trait)
@@ -28,6 +30,64 @@
 (define-map approved-executors
   principal
   bool
+)
+
+(define-map protocol-roles
+  {
+    role: uint,
+    account: principal,
+  }
+  bool
+)
+
+(map-set protocol-roles {
+  role: ROLE_ADMIN,
+  account: tx-sender,
+} true
+)
+
+(define-read-only (has-role
+    (role uint)
+    (account principal)
+  )
+  (default-to false
+    (map-get? protocol-roles {
+      role: role,
+      account: account,
+    })
+  )
+)
+
+(define-public (grant-role
+    (role uint)
+    (account principal)
+  )
+  (begin
+    (asserts! (has-role ROLE_ADMIN tx-sender) err-unauthorized)
+    (ok (map-set protocol-roles {
+      role: role,
+      account: account,
+    }
+      true
+    ))
+  )
+)
+
+(define-public (revoke-role
+    (role uint)
+    (account principal)
+  )
+  (begin
+    (asserts! (has-role ROLE_ADMIN tx-sender) err-unauthorized)
+    ;; Prevent the last admin from revoking themselves
+    (asserts! (not (and (is-eq role ROLE_ADMIN) (is-eq account tx-sender)))
+      err-unauthorized
+    )
+    (ok (map-delete protocol-roles {
+      role: role,
+      account: account,
+    }))
+  )
 )
 
 (define-map governance-proposals
@@ -180,7 +240,10 @@
       (current-invested (default-to u0 (map-get? active-strategies strategy-address)))
       (treasury (var-get treasury-balance))
     )
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts!
+      (or (has-role ROLE_ADMIN tx-sender) (has-role ROLE_STRATEGIST tx-sender))
+      err-unauthorized
+    )
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (<= amount treasury) err-insufficient-funds)
 
@@ -200,7 +263,10 @@
       (strategy-address (contract-of strategy))
       (current-allocation (default-to u0 (map-get? active-strategies strategy-address)))
     )
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts!
+      (or (has-role ROLE_ADMIN tx-sender) (has-role ROLE_STRATEGIST tx-sender))
+      err-unauthorized
+    )
     (asserts! (> current-allocation u0) err-insufficient-funds)
 
     (let ((harvested-amount (try! (as-contract (contract-call? strategy harvest)))))
@@ -218,7 +284,10 @@
       (strategy-address (contract-of strategy))
       (current-invested (default-to u0 (map-get? active-strategies strategy-address)))
     )
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts!
+      (or (has-role ROLE_ADMIN tx-sender) (has-role ROLE_STRATEGIST tx-sender))
+      err-unauthorized
+    )
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (<= amount current-invested) err-insufficient-funds)
 
@@ -235,7 +304,7 @@
 
 (define-public (create-proposal (proposal <proposal-trait>))
   (begin
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (has-role ROLE_ADMIN tx-sender) err-unauthorized)
     (let (
         (proposal-id (var-get proposal-counter))
         (executor (contract-of proposal))
@@ -315,7 +384,7 @@
     (proposal <proposal-trait>)
   )
   (let ((proposal-data (map-get? governance-proposals proposal-id)))
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (has-role ROLE_ADMIN tx-sender) err-unauthorized)
     (asserts! (is-some proposal-data) err-proposal-not-found)
     (let ((current-proposal (unwrap! proposal-data err-proposal-not-found)))
       (asserts! (is-eq (contract-of proposal) (get executor current-proposal))
@@ -344,7 +413,7 @@
     (revocable bool)
   )
   (begin
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (has-role ROLE_ADMIN tx-sender) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (> duration u0) err-invalid-amount)
     (asserts! (<= amount (var-get treasury-balance)) err-insufficient-funds)
@@ -401,7 +470,7 @@
 
 (define-public (revoke-vesting-stream (stream-id uint))
   (let ((stream (unwrap! (map-get? vesting-streams stream-id) err-stream-not-found)))
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (has-role ROLE_ADMIN tx-sender) err-unauthorized)
     (asserts! (get active stream) err-stream-finished)
     (asserts! (get revocable stream) err-not-revocable)
     (let (
@@ -433,7 +502,7 @@
 
 (define-public (set-governance-threshold (new-threshold uint))
   (begin
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (has-role ROLE_ADMIN tx-sender) err-unauthorized)
     (var-set governance-threshold new-threshold)
     (ok true)
   )
