@@ -1,4 +1,4 @@
-(define-constant contract-owner tx-sender)
+(define-constant contract-owner tx-sender)    
 (define-constant err-unauthorized (err u100))
 (define-constant err-insufficient-funds (err u101))
 (define-constant err-invalid-amount (err u102))
@@ -9,6 +9,7 @@
 (define-constant err-stream-finished (err u108))
 (define-constant err-not-unlocked (err u109))
 (define-constant err-no-locked-shares (err u110))
+(define-constant err-not-revocable (err u111))
 (define-constant one-tenth u10)
 
 (use-trait proposal-trait .proposal-trait.proposal-trait)
@@ -69,6 +70,7 @@
     start-height: uint,
     end-height: uint,
     active: bool,
+    revocable: bool,
   }
 )
 (define-map voting-escrow-balances
@@ -367,6 +369,7 @@
     (recipient principal)
     (amount uint)
     (duration uint)
+    (revocable bool)
   )
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
@@ -384,6 +387,7 @@
         start-height: stacks-block-height,
         end-height: end-height,
         active: true,
+        revocable: revocable,
       })
       (var-set treasury-balance (- (var-get treasury-balance) amount))
       (var-set stream-nonce (+ stream-id u1))
@@ -417,6 +421,38 @@
             })
           )
           (ok claimable)
+        )
+      )
+    )
+  )
+)
+
+(define-public (revoke-vesting-stream (stream-id uint))
+  (let ((stream (unwrap! (map-get? vesting-streams stream-id) err-stream-not-found)))
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (get active stream) err-stream-finished)
+    (asserts! (get revocable stream) err-not-revocable)
+    (let (
+        (current-height stacks-block-height)
+        (start (get start-height stream))
+        (end (get end-height stream))
+        (total (get total-amount stream))
+        (claimed (get claimed-amount stream))
+      )
+      (let ((vested (if (>= current-height end)
+          total
+          (/ (* total (- current-height start)) (- end start))
+        )))
+        (let ((unvested (- total vested)))
+          (map-set vesting-streams stream-id
+            (merge stream {
+              total-amount: vested,
+              end-height: current-height,
+              active: (< claimed vested),
+            })
+          )
+          (var-set treasury-balance (+ (var-get treasury-balance) unvested))
+          (ok unvested)
         )
       )
     )
