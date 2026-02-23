@@ -11,6 +11,8 @@
 (define-constant err-no-locked-shares (err u110))
 (define-constant one-tenth u10)
 
+(use-trait proposal-trait .proposal-trait.proposal-trait)
+
 (define-data-var treasury-balance uint u0)
 (define-data-var total-invested uint u0)
 (define-data-var proposal-counter uint u0)
@@ -18,20 +20,24 @@
 (define-data-var stream-nonce uint u0)
 
 (define-map fund-allocations
-    { fund-id: uint }
+  { fund-id: uint }
   uint
 )
 (define-map reward-pool
-    { fund-id: uint }
+  { fund-id: uint }
   uint
 )
+(define-map approved-executors
+  principal
+  bool
+)
+
 (define-map governance-proposals
   uint
-    {
+  {
     proposal-id: uint,
     proposal-type: (string-ascii 20),
-    target-fund: uint,
-    allocation-amount: uint,
+    executor: principal,
     votes-for: uint,
     votes-against: uint,
     status: (string-ascii 10),
@@ -39,7 +45,7 @@
   }
 )
 (define-map voter-records
-    {
+  {
     proposal-id: uint,
     voter: principal,
   }
@@ -47,7 +53,7 @@
 )
 (define-map yield-farms
   uint
-    {
+  {
     farm-name: (string-ascii 30),
     apy: uint,
     invested-amount: uint,
@@ -56,7 +62,7 @@
 )
 (define-map vesting-streams
   uint
-    {
+  {
     recipient: principal,
     total-amount: uint,
     claimed-amount: uint,
@@ -67,7 +73,7 @@
 )
 (define-map voting-escrow-balances
   principal
-    {
+  {
     locked-shares: uint,
     unlock-height: uint,
   }
@@ -97,7 +103,6 @@
         (new-locked-amount (+ (get locked-shares existing-lock) share-amount))
         (new-unlock-height (+ stacks-block-height lock-period))
       )
-      ;; Automatically extend the lock if a new larger lock period is applied
       (let ((final-unlock-height (if (> new-unlock-height (get unlock-height existing-lock))
           new-unlock-height
           (get unlock-height existing-lock)
@@ -220,7 +225,7 @@
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> apy u0) err-invalid-amount)
-    (asserts! (is-none (map-get? yield-farms farm-id)) (err u106)) ;; err-farm-already-exists
+    (asserts! (is-none (map-get? yield-farms farm-id)) (err u106))
     (map-set yield-farms farm-id {
       farm-name: farm-name,
       apy: apy,
@@ -231,25 +236,24 @@
   )
 )
 
-(define-public (create-reallocation-proposal
-    (new-farm-id uint)
-    (amount uint)
-  )
+(define-public (create-proposal (proposal <proposal-trait>))
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
-    (asserts! (> amount u0) err-invalid-amount)
-    (let ((proposal-id (var-get proposal-counter)))
+    (let (
+        (proposal-id (var-get proposal-counter))
+        (executor (contract-of proposal))
+      )
       (begin
         (map-set governance-proposals proposal-id {
           proposal-id: proposal-id,
-          proposal-type: "reallocation",
-          target-fund: new-farm-id,
-          allocation-amount: amount,
+          proposal-type: "executable",
+          executor: executor,
           votes-for: u0,
           votes-against: u0,
           status: "active",
           timestamp: stacks-block-height,
         })
+        (map-set approved-executors executor true)
         (var-set proposal-counter (+ proposal-id u1))
         (ok proposal-id)
       )
@@ -273,7 +277,7 @@
     )
     (asserts! (is-some proposal) err-proposal-not-found)
     (asserts! (> voter-stake u0) err-insufficient-funds)
-    ;; Check for skin in the game (must have locked shares)
+
     (asserts!
       (not (default-to false
         (map-get? voter-records {
@@ -309,26 +313,27 @@
   )
 )
 
-(define-public (execute-proposal (proposal-id uint))
-  (let ((proposal (map-get? governance-proposals proposal-id)))
+(define-public (execute-proposal
+    (proposal-id uint)
+    (proposal <proposal-trait>)
+  )
+  (let ((proposal-data (map-get? governance-proposals proposal-id)))
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
-    (asserts! (is-some proposal) err-proposal-not-found)
-    (let ((current-proposal (unwrap! proposal err-proposal-not-found)))
+    (asserts! (is-some proposal-data) err-proposal-not-found)
+    (let ((current-proposal (unwrap! proposal-data err-proposal-not-found)))
+      (asserts! (is-eq (contract-of proposal) (get executor current-proposal))
+        err-invalid-proposal
+      )
+      (asserts! (is-eq (get status current-proposal) "active")
+        err-invalid-proposal
+      )
       (asserts!
         (>= (get votes-for current-proposal) (var-get governance-threshold))
         err-invalid-proposal
       )
-      (let ((executed-proposal {
-          proposal-id: (get proposal-id current-proposal),
-          proposal-type: (get proposal-type current-proposal),
-          target-fund: (get target-fund current-proposal),
-          allocation-amount: (get allocation-amount current-proposal),
-          votes-for: (get votes-for current-proposal),
-          votes-against: (get votes-against current-proposal),
-          status: "executed",
-          timestamp: (get timestamp current-proposal),
-        }))
+      (let ((executed-proposal (merge current-proposal { status: "executed" })))
         (map-set governance-proposals proposal-id executed-proposal)
+        (try! (as-contract (contract-call? proposal execute)))
         (ok true)
       )
     )
