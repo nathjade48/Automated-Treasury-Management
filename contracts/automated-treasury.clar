@@ -15,7 +15,7 @@
 (define-data-var governance-threshold uint u2)
 (define-data-var stream-nonce uint u0)
 
-(define-map treasury-deposits principal uint)
+
 (define-map fund-allocations (tuple (fund-id uint)) uint)
 (define-map reward-pool (tuple (fund-id uint)) uint)
 (define-map governance-proposals uint (tuple
@@ -45,24 +45,32 @@
 ))
 
 (define-public (deposit-to-treasury (amount uint))
-  (begin
+  (let ((total-assets (+ (var-get treasury-balance) (var-get total-invested)))
+        (total-shares (unwrap-panic (contract-call? .treasury-token get-total-supply))))
     (asserts! (> amount u0) err-invalid-amount)
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-    (map-set treasury-deposits tx-sender (+ (default-to u0 (map-get? treasury-deposits tx-sender)) amount))
-    (var-set treasury-balance (+ (var-get treasury-balance) amount))
-    (ok true)
+    (let ((shares-to-mint (if (is-eq total-shares u0)
+                              amount
+                              (/ (* amount total-shares) total-assets))))
+      (var-set treasury-balance (+ (var-get treasury-balance) amount))
+      (try! (contract-call? .treasury-token mint shares-to-mint tx-sender))
+      (ok shares-to-mint)
+    )
   )
 )
 
-(define-public (withdraw-from-treasury (amount uint))
-  (let ((recipient tx-sender))
-    (asserts! (> amount u0) err-invalid-amount)
-    (let ((current-balance (default-to u0 (map-get? treasury-deposits recipient))))
-      (asserts! (>= current-balance amount) err-insufficient-funds)
-      (try! (as-contract (stx-transfer? amount tx-sender recipient)))
-      (map-set treasury-deposits recipient (- current-balance amount))
-      (var-set treasury-balance (- (var-get treasury-balance) amount))
-      (ok true)
+(define-public (withdraw-from-treasury (share-amount uint))
+  (let ((recipient tx-sender)
+        (total-assets (+ (var-get treasury-balance) (var-get total-invested)))
+        (total-shares (unwrap-panic (contract-call? .treasury-token get-total-supply))))
+    (asserts! (> share-amount u0) err-invalid-amount)
+    (asserts! (> total-shares u0) err-invalid-amount)
+    (let ((stx-to-return (/ (* share-amount total-assets) total-shares)))
+      (asserts! (<= stx-to-return (var-get treasury-balance)) err-insufficient-funds)
+      (try! (contract-call? .treasury-token burn share-amount tx-sender))
+      (var-set treasury-balance (- (var-get treasury-balance) stx-to-return))
+      (try! (as-contract (stx-transfer? stx-to-return tx-sender recipient)))
+      (ok stx-to-return)
     )
   )
 )
@@ -137,7 +145,7 @@
 
 (define-public (vote-on-proposal (proposal-id uint) (vote-for bool))
   (let ((proposal (map-get? governance-proposals proposal-id))
-        (voter-stake (default-to u0 (map-get? treasury-deposits tx-sender))))
+        (voter-stake (unwrap-panic (contract-call? .treasury-token get-balance tx-sender))))
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (is-some proposal) err-proposal-not-found)
     (asserts! (> voter-stake u0) err-insufficient-funds) ;; Check for skin in the game
@@ -275,8 +283,29 @@
   (map-get? yield-farms farm-id)
 )
 
+(define-read-only (get-total-assets)
+  (+ (var-get treasury-balance) (var-get total-invested))
+)
+
+(define-read-only (get-exchange-rate)
+  (let ((total-shares (unwrap-panic (contract-call? .treasury-token get-total-supply)))
+        (total-assets (get-total-assets)))
+    (if (is-eq total-shares u0)
+        u1000000
+        (/ (* total-assets u1000000) total-shares)
+    )
+  )
+)
+
 (define-read-only (get-user-deposit (user principal))
-  (default-to u0 (map-get? treasury-deposits user))
+  (let ((user-shares (unwrap-panic (contract-call? .treasury-token get-balance user)))
+        (total-shares (unwrap-panic (contract-call? .treasury-token get-total-supply)))
+        (total-assets (get-total-assets)))
+    (if (is-eq total-shares u0)
+        u0
+        (/ (* user-shares total-assets) total-shares)
+    )
+  )
 )
 
 (define-read-only (get-governance-threshold)
