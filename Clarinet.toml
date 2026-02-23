@@ -5,6 +5,16 @@ authors = []
 telemetry = true
 cache_dir = '.\.cache'
 requirements = []
+[contracts.sip-010-trait]
+path = 'contracts/sip-010-trait.clar'
+clarity_version = 3
+epoch = 'latest'
+
+[contracts.treasury-token]
+path = 'contracts/treasury-token.clar'
+clarity_version = 3
+epoch = 'latest'
+
 [contracts.automated-treasury]
 path = 'contracts/automated-treasury.clar'
 clarity_version = 3
