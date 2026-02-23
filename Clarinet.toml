@@ -5,6 +5,11 @@ authors = []
 telemetry = true
 cache_dir = '.\.cache'
 requirements = []
+[contracts.integrated-strategy-trait]
+path = 'contracts/integrated-strategy-trait.clar'
+clarity_version = 3
+epoch = 'latest'
+
 [contracts.proposal-trait]
 path = 'contracts/proposal-trait.clar'
 clarity_version = 3

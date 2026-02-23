@@ -12,6 +12,7 @@
 (define-constant one-tenth u10)
 
 (use-trait proposal-trait .proposal-trait.proposal-trait)
+(use-trait integrated-strategy-trait .integrated-strategy-trait.integrated-strategy-trait)
 
 (define-data-var treasury-balance uint u0)
 (define-data-var total-invested uint u0)
@@ -19,12 +20,8 @@
 (define-data-var governance-threshold uint u2)
 (define-data-var stream-nonce uint u0)
 
-(define-map fund-allocations
-  { fund-id: uint }
-  uint
-)
-(define-map reward-pool
-  { fund-id: uint }
+(define-map active-strategies
+  principal
   uint
 )
 (define-map approved-executors
@@ -51,15 +48,7 @@
   }
   bool
 )
-(define-map yield-farms
-  uint
-  {
-    farm-name: (string-ascii 30),
-    apy: uint,
-    invested-amount: uint,
-    claimed-rewards: uint,
-  }
-)
+
 (define-map vesting-streams
   uint
   {
@@ -180,19 +169,23 @@
   )
 )
 
-(define-public (invest-in-farm
-    (farm-id uint)
+(define-public (invest-in-strategy
+    (strategy <integrated-strategy-trait>)
     (amount uint)
   )
   (let (
-      (current-invested (default-to u0 (map-get? fund-allocations { fund-id: farm-id })))
+      (strategy-address (contract-of strategy))
+      (current-invested (default-to u0 (map-get? active-strategies strategy-address)))
       (treasury (var-get treasury-balance))
     )
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (<= amount treasury) err-insufficient-funds)
+
+    (try! (as-contract (contract-call? strategy deposit amount)))
+
     (let ((new-invested (+ current-invested amount)))
-      (map-set fund-allocations { fund-id: farm-id } new-invested)
+      (map-set active-strategies strategy-address new-invested)
       (var-set total-invested (+ (var-get total-invested) amount))
       (var-set treasury-balance (- treasury amount))
       (ok true)
@@ -200,39 +193,41 @@
   )
 )
 
-(define-public (claim-rewards (farm-id uint))
-  (let ((current-allocation (default-to u0 (map-get? fund-allocations { fund-id: farm-id }))))
+(define-public (claim-strategy-rewards (strategy <integrated-strategy-trait>))
+  (let (
+      (strategy-address (contract-of strategy))
+      (current-allocation (default-to u0 (map-get? active-strategies strategy-address)))
+    )
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> current-allocation u0) err-insufficient-funds)
-    (let (
-        (reward-amount (/ current-allocation one-tenth))
-        (current-pool (default-to u0 (map-get? reward-pool { fund-id: farm-id })))
-      )
-      (let ((new-pool-amount (+ current-pool reward-amount)))
-        (map-set reward-pool { fund-id: farm-id } new-pool-amount)
-        (var-set treasury-balance (+ (var-get treasury-balance) reward-amount))
-        (ok reward-amount)
-      )
+
+    (let ((harvested-amount (try! (as-contract (contract-call? strategy harvest)))))
+      (var-set treasury-balance (+ (var-get treasury-balance) harvested-amount))
+      (ok harvested-amount)
     )
   )
 )
 
-(define-public (register-yield-farm
-    (farm-id uint)
-    (farm-name (string-ascii 30))
-    (apy uint)
+(define-public (withdraw-from-strategy
+    (strategy <integrated-strategy-trait>)
+    (amount uint)
   )
-  (begin
+  (let (
+      (strategy-address (contract-of strategy))
+      (current-invested (default-to u0 (map-get? active-strategies strategy-address)))
+    )
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
-    (asserts! (> apy u0) err-invalid-amount)
-    (asserts! (is-none (map-get? yield-farms farm-id)) (err u106))
-    (map-set yield-farms farm-id {
-      farm-name: farm-name,
-      apy: apy,
-      invested-amount: u0,
-      claimed-rewards: u0,
-    })
-    (ok true)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (<= amount current-invested) err-insufficient-funds)
+
+    (try! (as-contract (contract-call? strategy withdraw amount)))
+
+    (let ((new-invested (- current-invested amount)))
+      (map-set active-strategies strategy-address new-invested)
+      (var-set total-invested (- (var-get total-invested) amount))
+      (var-set treasury-balance (+ (var-get treasury-balance) amount))
+      (ok true)
+    )
   )
 )
 
@@ -340,29 +335,6 @@
   )
 )
 
-(define-public (reallocate-funds
-    (from-farm-id uint)
-    (to-farm-id uint)
-    (amount uint)
-  )
-  (let (
-      (from-allocation (default-to u0 (map-get? fund-allocations { fund-id: from-farm-id })))
-      (to-allocation (default-to u0 (map-get? fund-allocations { fund-id: to-farm-id })))
-    )
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
-    (asserts! (> amount u0) err-invalid-amount)
-    (asserts! (>= from-allocation amount) err-insufficient-funds)
-    (let (
-        (new-from-amount (- from-allocation amount))
-        (new-to-amount (+ to-allocation amount))
-      )
-      (map-set fund-allocations { fund-id: from-farm-id } new-from-amount)
-      (map-set fund-allocations { fund-id: to-farm-id } new-to-amount)
-      (ok true)
-    )
-  )
-)
-
 (define-public (create-vesting-stream
     (recipient principal)
     (amount uint)
@@ -439,20 +411,8 @@
   (var-get total-invested)
 )
 
-(define-read-only (get-fund-allocation (fund-id uint))
-  (default-to u0 (map-get? fund-allocations { fund-id: fund-id }))
-)
-
-(define-read-only (get-fund-rewards (fund-id uint))
-  (default-to u0 (map-get? reward-pool { fund-id: fund-id }))
-)
-
-(define-read-only (get-proposal (proposal-id uint))
-  (map-get? governance-proposals proposal-id)
-)
-
-(define-read-only (get-yield-farm (farm-id uint))
-  (map-get? yield-farms farm-id)
+(define-read-only (get-strategy-allocation (strategy principal))
+  (default-to u0 (map-get? active-strategies strategy))
 )
 
 (define-read-only (get-total-assets)
