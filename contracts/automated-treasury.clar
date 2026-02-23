@@ -15,40 +15,66 @@
 (define-data-var governance-threshold uint u2)
 (define-data-var stream-nonce uint u0)
 
-(define-map treasury-deposits principal uint)
-(define-map fund-allocations (tuple (fund-id uint)) uint)
-(define-map reward-pool (tuple (fund-id uint)) uint)
-(define-map governance-proposals uint (tuple
-  (proposal-id uint)
-  (proposal-type (string-ascii 20))
-  (target-fund uint)
-  (allocation-amount uint)
-  (votes-for uint)
-  (votes-against uint)
-  (status (string-ascii 10))
-  (timestamp uint)
-))
-(define-map voter-records (tuple (proposal-id uint) (voter principal)) bool)
-(define-map yield-farms uint (tuple
-  (farm-name (string-ascii 30))
-  (apy uint)
-  (invested-amount uint)
-  (claimed-rewards uint)
-))
-(define-map vesting-streams uint (tuple
-  (recipient principal)
-  (total-amount uint)
-  (claimed-amount uint)
-  (start-height uint)
-  (end-height uint)
-  (active bool)
-))
+(define-map treasury-deposits
+  principal
+  uint
+)
+(define-map fund-allocations
+    { fund-id: uint }
+  uint
+)
+(define-map reward-pool
+    { fund-id: uint }
+  uint
+)
+(define-map governance-proposals
+  uint
+    {
+    proposal-id: uint,
+    proposal-type: (string-ascii 20),
+    target-fund: uint,
+    allocation-amount: uint,
+    votes-for: uint,
+    votes-against: uint,
+    status: (string-ascii 10),
+    timestamp: uint,
+  }
+)
+(define-map voter-records
+    {
+    proposal-id: uint,
+    voter: principal,
+  }
+  bool
+)
+(define-map yield-farms
+  uint
+    {
+    farm-name: (string-ascii 30),
+    apy: uint,
+    invested-amount: uint,
+    claimed-rewards: uint,
+  }
+)
+(define-map vesting-streams
+  uint
+    {
+    recipient: principal,
+    total-amount: uint,
+    claimed-amount: uint,
+    start-height: uint,
+    end-height: uint,
+    active: bool,
+  }
+)
 
 (define-public (deposit-to-treasury (amount uint))
   (begin
     (asserts! (> amount u0) err-invalid-amount)
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-    (map-set treasury-deposits tx-sender (+ (default-to u0 (map-get? treasury-deposits tx-sender)) amount))
+    (map-set treasury-deposits tx-sender
+      (+ (default-to u0 (map-get? treasury-deposits tx-sender)) amount)
+    )
     (var-set treasury-balance (+ (var-get treasury-balance) amount))
     (ok true)
   )
@@ -67,14 +93,19 @@
   )
 )
 
-(define-public (invest-in-farm (farm-id uint) (amount uint))
-  (let ((current-invested (default-to u0 (map-get? fund-allocations (tuple (fund-id farm-id)))))
-        (treasury (var-get treasury-balance)))
+(define-public (invest-in-farm
+    (farm-id uint)
+    (amount uint)
+  )
+  (let (
+      (current-invested (default-to u0 (map-get? fund-allocations { fund-id: farm-id })))
+      (treasury (var-get treasury-balance))
+    )
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (<= amount treasury) err-insufficient-funds)
     (let ((new-invested (+ current-invested amount)))
-      (map-set fund-allocations (tuple (fund-id farm-id)) new-invested)
+      (map-set fund-allocations { fund-id: farm-id } new-invested)
       (var-set total-invested (+ (var-get total-invested) amount))
       (var-set treasury-balance (- treasury amount))
       (ok true)
@@ -82,14 +113,36 @@
   )
 )
 
+(define-public (divest-from-farm
+    (farm-id uint)
+    (amount uint)
+  )
+  (let (
+      (current-invested (default-to u0 (map-get? fund-allocations { fund-id: farm-id })))
+      (treasury (var-get treasury-balance))
+    )
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (>= current-invested amount) err-insufficient-funds)
+    (let ((new-invested (- current-invested amount)))
+      (map-set fund-allocations { fund-id: farm-id } new-invested)
+      (var-set total-invested (- (var-get total-invested) amount))
+      (var-set treasury-balance (+ treasury amount))
+      (ok true)
+    )
+  )
+)
+
 (define-public (claim-rewards (farm-id uint))
-  (let ((current-allocation (default-to u0 (map-get? fund-allocations (tuple (fund-id farm-id))))))
+  (let ((current-allocation (default-to u0 (map-get? fund-allocations { fund-id: farm-id }))))
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> current-allocation u0) err-insufficient-funds)
-    (let ((reward-amount (/ current-allocation one-tenth))
-          (current-pool (default-to u0 (map-get? reward-pool (tuple (fund-id farm-id))))))
+    (let (
+        (reward-amount (/ current-allocation one-tenth))
+        (current-pool (default-to u0 (map-get? reward-pool { fund-id: farm-id })))
+      )
       (let ((new-pool-amount (+ current-pool reward-amount)))
-        (map-set reward-pool (tuple (fund-id farm-id)) new-pool-amount)
+        (map-set reward-pool { fund-id: farm-id } new-pool-amount)
         (var-set treasury-balance (+ (var-get treasury-balance) reward-amount))
         (ok reward-amount)
       )
@@ -97,7 +150,11 @@
   )
 )
 
-(define-public (register-yield-farm (farm-id uint) (farm-name (string-ascii 30)) (apy uint))
+(define-public (register-yield-farm
+    (farm-id uint)
+    (farm-name (string-ascii 30))
+    (apy uint)
+  )
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> apy u0) err-invalid-amount)
@@ -106,13 +163,16 @@
       farm-name: farm-name,
       apy: apy,
       invested-amount: u0,
-      claimed-rewards: u0
+      claimed-rewards: u0,
     })
     (ok true)
   )
 )
 
-(define-public (create-reallocation-proposal (new-farm-id uint) (amount uint))
+(define-public (create-reallocation-proposal
+    (new-farm-id uint)
+    (amount uint)
+  )
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
@@ -126,7 +186,7 @@
           votes-for: u0,
           votes-against: u0,
           status: "active",
-          timestamp: stacks-block-height
+          timestamp: stacks-block-height,
         })
         (var-set proposal-counter (+ proposal-id u1))
         (ok proposal-id)
@@ -135,22 +195,45 @@
   )
 )
 
-(define-public (vote-on-proposal (proposal-id uint) (vote-for bool))
-  (let ((proposal (map-get? governance-proposals proposal-id))
-        (voter-stake (default-to u0 (map-get? treasury-deposits tx-sender))))
+(define-public (vote-on-proposal
+    (proposal-id uint)
+    (vote-for bool)
+  )
+  (let (
+      (proposal (map-get? governance-proposals proposal-id))
+      (voter-stake (default-to u0 (map-get? treasury-deposits tx-sender)))
+    )
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (is-some proposal) err-proposal-not-found)
-    (asserts! (> voter-stake u0) err-insufficient-funds) ;; Check for skin in the game
-    (asserts! (not (default-to false (map-get? voter-records (tuple (proposal-id proposal-id) (voter tx-sender))))) err-already-voted)
+    (asserts! (> voter-stake u0) err-insufficient-funds)
+    ;; Check for skin in the game
+    (asserts!
+      (not (default-to false
+        (map-get? voter-records {
+          proposal-id: proposal-id,
+          voter: tx-sender,
+        })
+      ))
+      err-already-voted
+    )
     (let ((current-proposal (unwrap! proposal err-proposal-not-found)))
       (begin
-        (map-set voter-records (tuple (proposal-id proposal-id) (voter tx-sender)) true)
+        (map-set voter-records {
+          proposal-id: proposal-id,
+          voter: tx-sender,
+        }
+          true
+        )
         (if vote-for
           (let ((new-votes-for (+ (get votes-for current-proposal) voter-stake)))
-            (map-set governance-proposals proposal-id (merge current-proposal { votes-for: new-votes-for }))
+            (map-set governance-proposals proposal-id
+              (merge current-proposal { votes-for: new-votes-for })
+            )
           )
           (let ((new-votes-against (+ (get votes-against current-proposal) voter-stake)))
-            (map-set governance-proposals proposal-id (merge current-proposal { votes-against: new-votes-against }))
+            (map-set governance-proposals proposal-id
+              (merge current-proposal { votes-against: new-votes-against })
+            )
           )
         )
         (ok true)
@@ -164,17 +247,20 @@
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (is-some proposal) err-proposal-not-found)
     (let ((current-proposal (unwrap! proposal err-proposal-not-found)))
-      (asserts! (>= (get votes-for current-proposal) (var-get governance-threshold)) err-invalid-proposal)
-      (let ((executed-proposal (tuple
-        (proposal-id (get proposal-id current-proposal))
-        (proposal-type (get proposal-type current-proposal))
-        (target-fund (get target-fund current-proposal))
-        (allocation-amount (get allocation-amount current-proposal))
-        (votes-for (get votes-for current-proposal))
-        (votes-against (get votes-against current-proposal))
-        (status "executed")
-        (timestamp (get timestamp current-proposal))
-      )))
+      (asserts!
+        (>= (get votes-for current-proposal) (var-get governance-threshold))
+        err-invalid-proposal
+      )
+      (let ((executed-proposal {
+          proposal-id: (get proposal-id current-proposal),
+          proposal-type: (get proposal-type current-proposal),
+          target-fund: (get target-fund current-proposal),
+          allocation-amount: (get allocation-amount current-proposal),
+          votes-for: (get votes-for current-proposal),
+          votes-against: (get votes-against current-proposal),
+          status: "executed",
+          timestamp: (get timestamp current-proposal),
+        }))
         (map-set governance-proposals proposal-id executed-proposal)
         (ok true)
       )
@@ -182,36 +268,50 @@
   )
 )
 
-(define-public (reallocate-funds (from-farm-id uint) (to-farm-id uint) (amount uint))
-  (let ((from-allocation (default-to u0 (map-get? fund-allocations (tuple (fund-id from-farm-id)))))
-        (to-allocation (default-to u0 (map-get? fund-allocations (tuple (fund-id to-farm-id))))))
+(define-public (reallocate-funds
+    (from-farm-id uint)
+    (to-farm-id uint)
+    (amount uint)
+  )
+  (let (
+      (from-allocation (default-to u0 (map-get? fund-allocations { fund-id: from-farm-id })))
+      (to-allocation (default-to u0 (map-get? fund-allocations { fund-id: to-farm-id })))
+    )
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (>= from-allocation amount) err-insufficient-funds)
-    (let ((new-from-amount (- from-allocation amount))
-          (new-to-amount (+ to-allocation amount)))
-      (map-set fund-allocations (tuple (fund-id from-farm-id)) new-from-amount)
-      (map-set fund-allocations (tuple (fund-id to-farm-id)) new-to-amount)
+    (let (
+        (new-from-amount (- from-allocation amount))
+        (new-to-amount (+ to-allocation amount))
+      )
+      (map-set fund-allocations { fund-id: from-farm-id } new-from-amount)
+      (map-set fund-allocations { fund-id: to-farm-id } new-to-amount)
       (ok true)
     )
   )
 )
 
-(define-public (create-vesting-stream (recipient principal) (amount uint) (duration uint))
+(define-public (create-vesting-stream
+    (recipient principal)
+    (amount uint)
+    (duration uint)
+  )
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (> duration u0) err-invalid-amount)
     (asserts! (<= amount (var-get treasury-balance)) err-insufficient-funds)
-    (let ((stream-id (var-get stream-nonce))
-          (end-height (+ stacks-block-height duration)))
+    (let (
+        (stream-id (var-get stream-nonce))
+        (end-height (+ stacks-block-height duration))
+      )
       (map-set vesting-streams stream-id {
         recipient: recipient,
         total-amount: amount,
         claimed-amount: u0,
         start-height: stacks-block-height,
         end-height: end-height,
-        active: true
+        active: true,
       })
       (var-set treasury-balance (- (var-get treasury-balance) amount))
       (var-set stream-nonce (+ stream-id u1))
@@ -224,18 +324,26 @@
   (let ((stream (unwrap! (map-get? vesting-streams stream-id) err-stream-not-found)))
     (asserts! (get active stream) err-stream-finished)
     (asserts! (is-eq tx-sender (get recipient stream)) err-unauthorized)
-    (let ((current-height stacks-block-height)
-          (start (get start-height stream))
-          (end (get end-height stream))
-          (total (get total-amount stream))
-          (claimed (get claimed-amount stream)))
+    (let (
+        (current-height stacks-block-height)
+        (start (get start-height stream))
+        (end (get end-height stream))
+        (total (get total-amount stream))
+        (claimed (get claimed-amount stream))
+      )
       (let ((vested (if (>= current-height end)
-                        total
-                        (/ (* total (- current-height start)) (- end start)))))
+          total
+          (/ (* total (- current-height start)) (- end start))
+        )))
         (let ((claimable (- vested claimed)))
           (asserts! (> claimable u0) err-insufficient-funds)
           (try! (as-contract (stx-transfer? claimable tx-sender (get recipient stream))))
-          (map-set vesting-streams stream-id (merge stream { claimed-amount: vested, active: (< vested total) }))
+          (map-set vesting-streams stream-id
+            (merge stream {
+              claimed-amount: vested,
+              active: (< vested total),
+            })
+          )
           (ok claimable)
         )
       )
@@ -260,11 +368,11 @@
 )
 
 (define-read-only (get-fund-allocation (fund-id uint))
-  (default-to u0 (map-get? fund-allocations (tuple (fund-id fund-id))))
+  (default-to u0 (map-get? fund-allocations { fund-id: fund-id }))
 )
 
 (define-read-only (get-fund-rewards (fund-id uint))
-  (default-to u0 (map-get? reward-pool (tuple (fund-id fund-id))))
+  (default-to u0 (map-get? reward-pool { fund-id: fund-id }))
 )
 
 (define-read-only (get-proposal (proposal-id uint))
@@ -289,18 +397,21 @@
 
 (define-read-only (get-stream-claimable-amount (stream-id uint))
   (let ((stream (unwrap! (map-get? vesting-streams stream-id) u0)))
-    (let ((current-height stacks-block-height)
-          (start (get start-height stream))
-          (end (get end-height stream))
-          (total (get total-amount stream))
-          (claimed (get claimed-amount stream)))
+    (let (
+        (current-height stacks-block-height)
+        (start (get start-height stream))
+        (end (get end-height stream))
+        (total (get total-amount stream))
+        (claimed (get claimed-amount stream))
+      )
       (if (not (get active stream))
-          u0
-          (let ((vested (if (>= current-height end)
-                            total
-                            (/ (* total (- current-height start)) (- end start)))))
-            (- vested claimed)
-          )
+        u0
+        (let ((vested (if (>= current-height end)
+            total
+            (/ (* total (- current-height start)) (- end start))
+          )))
+          (- vested claimed)
+        )
       )
     )
   )
