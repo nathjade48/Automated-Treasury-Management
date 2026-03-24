@@ -20,6 +20,7 @@
 (define-data-var proposal-counter uint u0)
 (define-data-var governance-threshold uint u2)
 (define-data-var stream-nonce uint u0)
+(define-data-var performance-fee uint u1000) ;; 10% default fee (in basis points)
 
 (define-map active-strategies
   principal
@@ -204,8 +205,17 @@
     (asserts! (> current-allocation u0) err-insufficient-funds)
 
     (let ((harvested-amount (try! (as-contract (contract-call? strategy harvest)))))
-      (var-set treasury-balance (+ (var-get treasury-balance) harvested-amount))
-      (ok harvested-amount)
+      (let (
+          (fee-amount (/ (* harvested-amount (var-get performance-fee)) u10000))
+          (treasury-amount (- harvested-amount fee-amount))
+        )
+        (if (> fee-amount u0)
+          (try! (as-contract (stx-transfer? fee-amount tx-sender contract-owner)))
+          false
+        )
+        (var-set treasury-balance (+ (var-get treasury-balance) treasury-amount))
+        (ok harvested-amount)
+      )
     )
   )
 )
@@ -435,6 +445,15 @@
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (var-set governance-threshold new-threshold)
+    (ok true)
+  )
+)
+
+(define-public (set-performance-fee (new-fee uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (<= new-fee u10000) err-invalid-amount)
+    (var-set performance-fee new-fee)
     (ok true)
   )
 )
