@@ -10,6 +10,7 @@
 (define-constant err-not-unlocked (err u109))
 (define-constant err-no-locked-shares (err u110))
 (define-constant err-not-revocable (err u111))
+(define-constant err-paused (err u112))
 (define-constant one-tenth u10)
 
 (use-trait proposal-trait .proposal-trait.proposal-trait)
@@ -20,6 +21,7 @@
 (define-data-var proposal-counter uint u0)
 (define-data-var governance-threshold uint u2)
 (define-data-var stream-nonce uint u0)
+(define-data-var is-paused bool false)
 
 (define-map active-strategies
   principal
@@ -122,11 +124,26 @@
     )
   )
 )
+(define-public (pause-contract)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (ok (var-set is-paused true))
+  )
+)
+
+(define-public (resume-contract)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (ok (var-set is-paused false))
+  )
+)
+
 (define-public (deposit-to-treasury (amount uint))
   (let (
       (total-assets (+ (var-get treasury-balance) (var-get total-invested)))
       (total-shares (unwrap-panic (contract-call? .treasury-token get-total-supply)))
     )
+    (asserts! (not (var-get is-paused)) err-paused)
     (asserts! (> amount u0) err-invalid-amount)
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
     (let ((shares-to-mint (if (is-eq total-shares u0)
@@ -180,6 +197,7 @@
       (current-invested (default-to u0 (map-get? active-strategies strategy-address)))
       (treasury (var-get treasury-balance))
     )
+    (asserts! (not (var-get is-paused)) err-paused)
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (<= amount treasury) err-insufficient-funds)
@@ -218,6 +236,7 @@
       (strategy-address (contract-of strategy))
       (current-invested (default-to u0 (map-get? active-strategies strategy-address)))
     )
+    (asserts! (not (var-get is-paused)) err-paused)
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (<= amount current-invested) err-insufficient-funds)
@@ -235,6 +254,7 @@
 
 (define-public (create-proposal (proposal <proposal-trait>))
   (begin
+    (asserts! (not (var-get is-paused)) err-paused)
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (let (
         (proposal-id (var-get proposal-counter))
@@ -315,6 +335,7 @@
     (proposal <proposal-trait>)
   )
   (let ((proposal-data (map-get? governance-proposals proposal-id)))
+    (asserts! (not (var-get is-paused)) err-paused)
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (is-some proposal-data) err-proposal-not-found)
     (let ((current-proposal (unwrap! proposal-data err-proposal-not-found)))
@@ -344,6 +365,7 @@
     (revocable bool)
   )
   (begin
+    (asserts! (not (var-get is-paused)) err-paused)
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (> duration u0) err-invalid-amount)
