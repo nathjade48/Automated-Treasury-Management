@@ -10,10 +10,17 @@
 (define-constant err-not-unlocked (err u109))
 (define-constant err-no-locked-shares (err u110))
 (define-constant err-not-revocable (err u111))
+(define-constant err-flash-loan-failed (err u112))
 (define-constant one-tenth u10)
 
 (use-trait proposal-trait .proposal-trait.proposal-trait)
 (use-trait integrated-strategy-trait .integrated-strategy-trait.integrated-strategy-trait)
+
+(define-trait flash-loan-user-trait
+  (
+    (execute (uint uint) (response bool uint))
+  )
+)
 
 (define-data-var treasury-balance uint u0)
 (define-data-var total-invested uint u0)
@@ -168,6 +175,31 @@
       (try! (as-contract (stx-transfer? stx-to-return tx-sender recipient)))
       (ok stx-to-return)
     )
+  )
+)
+
+(define-public (flash-loan
+    (receiver <flash-loan-user-trait>)
+    (amount uint)
+  )
+  (let (
+      (fee (/ (* amount u5) u1000)) ;; 0.5% fee
+      (total-due (+ amount fee))
+      (treasury (var-get treasury-balance))
+      (caller tx-sender)
+    )
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (<= amount treasury) err-insufficient-funds)
+    
+    (try! (as-contract (stx-transfer? amount tx-sender caller)))
+    (var-set treasury-balance (- treasury amount))
+
+    (asserts! (unwrap! (contract-call? receiver execute amount fee) err-flash-loan-failed) err-flash-loan-failed)
+    
+    (try! (stx-transfer? total-due caller (as-contract tx-sender)))
+    (var-set treasury-balance (+ (var-get treasury-balance) total-due))
+    
+    (ok fee)
   )
 )
 
@@ -405,7 +437,7 @@
     (asserts! (get active stream) err-stream-finished)
     (asserts! (get revocable stream) err-not-revocable)
     (let (
-        (current-height stacks-block-height)
+         (current-height stacks-block-height)
         (start (get start-height stream))
         (end (get end-height stream))
         (total (get total-amount stream))
